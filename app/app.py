@@ -1,7 +1,7 @@
 from shiny import App, ui, render, reactive
 from typing import List, Dict, Any
 
-# === Reused constants and structures from codelookup.py (GUI-independent) ===
+# === Constants and data (ported from codelookup.py) ===
 
 SAS_TEMPLATE = """
 /* {var_value} */
@@ -154,29 +154,11 @@ TOPICS = {
 }
 
 SURVEYS = {
-    "YRBS": {
-        "full_name": "NYC Youth Risk Behavior Survey",
-        "population": "Youth",
-        "tag_suffix": "YRBS",
-    },
-    "CHS": {
-        "full_name": "Community Health Survey",
-        "population": "Adult",
-        "tag_suffix": "CHS",
-    },
-    "HANES": {
-        "full_name": "NYC Health and Nutrition Examination Survey",
-        "population": "Adult",
-        "tag_suffix": "HANES",
-    },
-    "CCHS": {
-        "full_name": "NYC Child Health Data",
-        "population": "Youth",
-        "tag_suffix": "CCHS",
-    },
+    "YRBS": {"full_name": "NYC Youth Risk Behavior Survey", "population": "Youth", "tag_suffix": "YRBS"},
+    "CHS": {"full_name": "Community Health Survey", "population": "Adult", "tag_suffix": "CHS"},
+    "HANES": {"full_name": "NYC Health and Nutrition Examination Survey", "population": "Adult", "tag_suffix": "HANES"},
+    "CCHS": {"full_name": "NYC Child Health Data", "population": "Youth", "tag_suffix": "CCHS"},
 }
-
-# === Helper to compute topic/subtopic IDs following original logic ===
 
 def compute_ids(var_type: str, topic: str, sub_topic: str) -> Dict[str, int]:
     topic_id = TOPICS.get(topic, {}).get("id", 0) if topic else 0
@@ -210,7 +192,7 @@ def generate_sas_for_variable(var_data: Dict[str, Any]) -> List[str]:
         parts.append("")  # blank line between entries
     return parts
 
-# === Shiny UI mirroring the original inputs and constraints ===
+# === UI: two-column layout for queue and generated code ===
 
 topic_options = sorted(TOPICS.keys())
 
@@ -218,48 +200,46 @@ app_ui = ui.page_fluid(
     ui.h2("SAS Code Generator (Client-side, Shinylive)"),
     ui.layout_sidebar(
         ui.sidebar(
-            ui.input_select(
-                "dataset", "Survey Dataset", choices=list(SURVEYS.keys()), selected="YRBS"
-            ),
+            ui.input_select("dataset", "Survey Dataset", choices=list(SURVEYS.keys()), selected="YRBS"),
             ui.input_text("var_code", "Variable Code"),
             ui.input_text("var_name", "Variable Name"),
             ui.input_text("description", "Description"),
-            ui.input_select(
-                "var_type",
-                "Variable Type",
-                choices=["Indicator", "Demographic"],
-                selected="Indicator",
-            ),
+            ui.input_select("var_type", "Variable Type", choices=["Indicator", "Demographic"], selected="Indicator"),
             ui.input_select("topic", "Topic", choices=topic_options, selected=topic_options[0]),
             ui.input_select("sub_topic", "Sub-Topic", choices=[], selected=None),
             ui.input_numeric("levels", "Number of Levels", 2, min=2, max=6),
             ui.output_ui("level_inputs"),
-            ui.input_action_button("add_var", "Add Variable to List", class_="btn-primary"),
+            ui.input_action_button("add_var", "Add Variable to Queue", class_="btn-primary"),
+            ui.input_action_button("clear_queue", "Clear Queue", class_="btn-secondary"),
             ui.hr(),
             ui.input_action_button("generate", "Generate SAS Code", class_="btn-success"),
             ui.hr(),
-            ui.markdown(
-                "- Indicator requires Topic and Sub-Topic; Demographic disables both.\n"
-                "- Levels 2–6; provide names for each level.\n"
-                "- Click 'Add Variable to List' to queue multiple variables before Generate."
+            ui.output_text_verbatim("validation_errors"),
+        ),
+        ui.row(
+            ui.column(
+                6,
+                ui.card(
+                    ui.card_header("Queued Variables"),
+                    ui.output_text_verbatim("queue_summary"),
+                ),
             ),
-        ),
-        ui.card(
-            ui.card_header("Queued Variables"),
-            ui.output_text_verbatim("queue_summary"),
-        ),
-        ui.card(
-            ui.card_header("Generated SAS Code"),
-            ui.output_text_verbatim("sas_code"),
+            ui.column(
+                6,
+                ui.card(
+                    ui.card_header("Generated SAS Code"),
+                    ui.output_text_verbatim("sas_code"),
+                ),
+            ),
         ),
     ),
 )
 
 def server(input, output, session):
-    # Reactive store of queued variables (list of dicts)
     queued: reactive.Value[List[Dict[str, Any]]] = reactive.Value([])
+    last_error: reactive.Value[str] = reactive.Value("")
 
-    # Update topic/subtopic enablement based on var_type
+    # Dynamic subtopic handling and enable/disable logic
     @reactive.calc
     def current_subtopics():
         vt = input.var_type()
@@ -268,21 +248,10 @@ def server(input, output, session):
             return []
         return sorted(TOPICS.get(topic, {}).get("subtopics", {}).keys())
 
-    @output
-    @render.ui
-    def level_inputs():
-        # Render dynamic level name inputs
-        n = input.levels()
-        items = []
-        for i in range(1, int(n) + 1):
-            items.append(ui.input_text(f"level_{i}", f"Level {i} Name"))
-        return ui.div(*items)
-
-    # Keep sub_topic choices in sync
     @reactive.effect
     def _sync_subtopics():
         subs = current_subtopics()
-        # Update sub_topic choices dynamically
+        # Update choices and selection
         session.send_input_message(
             "sub_topic",
             {
@@ -295,8 +264,13 @@ def server(input, output, session):
         session.send_input_message("topic", {"disabled": vt == "Demographic"})
         session.send_input_message("sub_topic", {"disabled": vt == "Demographic"})
 
+    @output
+    @render.ui
+    def level_inputs():
+        n = int(input.levels() or 2)
+        return ui.div(*[ui.input_text(f"level_{i}", f"Level {i} Name") for i in range(1, n + 1)])
+
     def validate_current() -> str:
-        # Return empty string if valid; else an error message
         if not input.dataset():
             return "Please select a Survey Dataset."
         if not (input.var_code() or "").strip():
@@ -305,9 +279,10 @@ def server(input, output, session):
             return "Please enter Variable Name."
         if not (input.description() or "").strip():
             return "Please enter Description."
-        if input.var_type() not in ["Indicator", "Demographic"]:
+        vt = input.var_type()
+        if vt not in ["Indicator", "Demographic"]:
             return "Please select Variable Type."
-        if input.var_type() == "Indicator":
+        if vt == "Indicator":
             if not input.topic() or not input.sub_topic():
                 return "Please select Topic and Sub-Topic for Indicators."
         try:
@@ -350,15 +325,27 @@ def server(input, output, session):
     @reactive.event(input.add_var)
     def add_var():
         err = validate_current()
+        last_error.set(err)
         if err:
-            # Surface validation errors inline in queue summary pane
-            queued.set(queued.get())
             session.send_notification(err, type="error")
+            # Force redraw of validation_errors
+            queued.set(queued.get())
             return
         q = queued.get().copy()
         q.append(build_var_data())
         queued.set(q)
+        last_error.set("")
         session.send_notification("Variable added to queue.", type="message")
+
+    @reactive.event(input.clear_queue)
+    def _clear():
+        queued.set([])
+        session.send_notification("Queue cleared.", type="message")
+
+    @output
+    @render.text
+    def validation_errors():
+        return last_error.get() or ""
 
     @output
     @render.text
@@ -376,7 +363,11 @@ def server(input, output, session):
 
     @reactive.event(input.generate)
     def _generate():
-        pass
+        # Trigger re-render of sas_code; show error if queue empty
+        if not queued.get():
+            msg = "No variables to generate SAS code."
+            last_error.set(msg)
+            session.send_notification(msg, type="error")
 
     @output
     @render.text
