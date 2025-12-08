@@ -1,7 +1,7 @@
 from shiny import App, ui, render, reactive
 from typing import List, Dict, Any
 
-# === Constants and data (ported from codelookup.py) ===
+# === Constants/data ported from codelookup.py ===
 
 SAS_TEMPLATE = """
 /* {var_value} */
@@ -192,7 +192,7 @@ def generate_sas_for_variable(var_data: Dict[str, Any]) -> List[str]:
         parts.append("")  # blank line between entries
     return parts
 
-# === UI: two-column layout for queue and generated code ===
+# === UI (two columns for queue and output) ===
 
 topic_options = sorted(TOPICS.keys())
 
@@ -206,6 +206,7 @@ app_ui = ui.page_fluid(
             ui.input_text("description", "Description"),
             ui.input_select("var_type", "Variable Type", choices=["Indicator", "Demographic"], selected="Indicator"),
             ui.input_select("topic", "Topic", choices=topic_options, selected=topic_options[0]),
+            # Initialize sub_topic with no choices and no selection
             ui.input_select("sub_topic", "Sub-Topic", choices=[], selected=None),
             ui.input_numeric("levels", "Number of Levels", 2, min=2, max=6),
             ui.output_ui("level_inputs"),
@@ -239,36 +240,39 @@ def server(input, output, session):
     queued: reactive.Value[List[Dict[str, Any]]] = reactive.Value([])
     last_error: reactive.Value[str] = reactive.Value("")
 
-    # Dynamic subtopic handling and enable/disable logic
-    @reactive.calc
-    def current_subtopics():
-        vt = input.var_type()
-        topic = input.topic()
-        if vt == "Demographic" or not topic:
-            return []
-        return sorted(TOPICS.get(topic, {}).get("subtopics", {}).keys())
-
-    @reactive.effect
-    def _sync_subtopics():
-        subs = current_subtopics()
-        # Update choices and selection
-        session.send_input_message(
-            "sub_topic",
-            {
-                "options": [{"label": s, "value": s} for s in subs],
-                "selected": (subs[0] if subs else None),
-            },
-        )
-        # Disable topic/sub_topic when Demographic
-        vt = input.var_type()
-        session.send_input_message("topic", {"disabled": vt == "Demographic"})
-        session.send_input_message("sub_topic", {"disabled": vt == "Demographic"})
-
+    # Dynamic level inputs
     @output
     @render.ui
     def level_inputs():
         n = int(input.levels() or 2)
         return ui.div(*[ui.input_text(f"level_{i}", f"Level {i} Name") for i in range(1, n + 1)])
+
+    # Sub-topic updater effect (reacts to both var_type and topic)
+    @reactive.effect
+    def _update_subtopics():
+        vt = input.var_type()
+        topic = input.topic()
+
+        # Disable topic/sub_topic for Demographic
+        session.send_input_message("topic", {"disabled": vt == "Demographic"})
+        session.send_input_message("sub_topic", {"disabled": vt == "Demographic"})
+
+        # Build options
+        if vt == "Demographic" or not topic:
+            options = []
+            selected = None
+        else:
+            options = sorted(TOPICS.get(topic, {}).get("subtopics", {}).keys())
+            selected = options[0] if options else None
+
+        # Send choices and selection; ensure we don't select a value not in options
+        session.send_input_message(
+            "sub_topic",
+            {
+                "options": [{"label": s, "value": s} for s in options],
+                "selected": selected,
+            },
+        )
 
     def validate_current() -> str:
         if not input.dataset():
@@ -283,8 +287,13 @@ def server(input, output, session):
         if vt not in ["Indicator", "Demographic"]:
             return "Please select Variable Type."
         if vt == "Indicator":
-            if not input.topic() or not input.sub_topic():
-                return "Please select Topic and Sub-Topic for Indicators."
+            # Require a topic with at least one subtopic choice and a selected sub_topic
+            topic = input.topic()
+            subs = sorted(TOPICS.get(topic, {}).get("subtopics", {}).keys()) if topic else []
+            if not topic or not subs:
+                return "Please select a Topic that has Sub-Topics."
+            if not input.sub_topic():
+                return "Please select a Sub-Topic."
         try:
             n = int(input.levels())
         except Exception:
@@ -328,8 +337,7 @@ def server(input, output, session):
         last_error.set(err)
         if err:
             session.send_notification(err, type="error")
-            # Force redraw of validation_errors
-            queued.set(queued.get())
+            queued.set(queued.get())  # force UI update of validation_errors
             return
         q = queued.get().copy()
         q.append(build_var_data())
@@ -363,7 +371,6 @@ def server(input, output, session):
 
     @reactive.event(input.generate)
     def _generate():
-        # Trigger re-render of sas_code; show error if queue empty
         if not queued.get():
             msg = "No variables to generate SAS code."
             last_error.set(msg)
