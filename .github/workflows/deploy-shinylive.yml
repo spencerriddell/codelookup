@@ -27,7 +27,7 @@ jobs:
 
       - name: Build Shinylive app
         run: |
-          python -m shinylive export app docs
+          shinylive export app docs
 
       - name: Add no-Jekyll
         run: |
