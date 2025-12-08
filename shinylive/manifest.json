@@ -1,0 +1,6 @@
+{
+  "app_dir": "app",
+  "output_dir": "docs",
+  "index_title": "CodeLookup Dashboard",
+  "index_description": "Client-side Shiny for Python dashboard (Shinylive) to generate SAS code."
+}
