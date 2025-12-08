@@ -34,6 +34,7 @@ def server(input, output, session):
         dataset = input.dataset() or "mydata"
         column = input.code_column() or "code"
         # Placeholder SAS code generation logic — replace with your codelookup logic
+        # TODO: Add input validation/sanitization when implementing real codelookup logic
         lines = [
             f"/* Generated SAS code for term: {term} */",
             f"data filtered;",
