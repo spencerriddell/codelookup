@@ -37,6 +37,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs
+          git add -f docs
           git commit -m "Build Shinylive site" || echo "No changes to commit"
           git push
