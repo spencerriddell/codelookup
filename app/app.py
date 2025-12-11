@@ -311,7 +311,10 @@ def server(input, output, session):
         
         if n >= 2:
             for i in range(1, n + 1):
-                name = (getattr(input, f"level_{i}")() or "").strip()
+                try:
+                    name = (input[f"level_{i}"]() or "").strip()
+                except (KeyError, AttributeError):
+                    name = ""
                 if not name:
                     errors.append(f"Level {i} Name")
         
@@ -327,7 +330,14 @@ def server(input, output, session):
         except Exception:
             n = 0
         
-        levels = [(getattr(input, f"level_{i}")() or "").strip() for i in range(1, max(n + 1, 1))]
+        # Get level values, handling cases where inputs might not exist yet
+        levels = []
+        for i in range(1, n + 1):
+            try:
+                level_val = (input[f"level_{i}"]() or "").strip()
+            except (KeyError, AttributeError):
+                level_val = ""
+            levels.append(level_val)
         var_type = input.var_type() or "Indicator"
         topic = input.topic() if var_type == "Indicator" else ""
         sub_topic = input.sub_topic() if var_type == "Indicator" else ""
