@@ -239,6 +239,8 @@ app_ui = ui.page_fluid(
 def server(input, output, session):
     queued: reactive.Value[List[Dict[str, Any]]] = reactive.Value([])
     last_error: reactive.Value[str] = reactive.Value("")
+    awaiting_confirmation: reactive.Value[bool] = reactive.Value(False)
+    pending_validation_errors: reactive.Value[List[str]] = reactive.Value([])
 
     # Dynamic level inputs
     @output
@@ -253,68 +255,94 @@ def server(input, output, session):
         vt = input.var_type()
         topic = input.topic()
 
-        # Disable topic/sub_topic for Demographic
-        session.send_input_message("topic", {"disabled": vt == "Demographic"})
-        session.send_input_message("sub_topic", {"disabled": vt == "Demographic"})
+        # Disable/enable based on variable type
+        is_demographic = vt == "Demographic"
+        session.send_input_message("topic", {"disabled": is_demographic})
+        session.send_input_message("sub_topic", {"disabled": is_demographic})
 
         # Build options
-        if vt == "Demographic" or not topic:
+        if is_demographic or not topic:
             options = []
             selected = None
         else:
             options = sorted(TOPICS.get(topic, {}).get("subtopics", {}).keys())
             selected = options[0] if options else None
 
-        # Send choices and selection; ensure we don't select a value not in options
-        session.send_input_message(
+        # Use ui.update_select for updating choices - more reliable than send_input_message
+        ui.update_select(
             "sub_topic",
-            {
-                "options": [{"label": s, "value": s} for s in options],
-                "selected": selected,
-            },
+            session=session,
+            choices=options,
+            selected=selected,
         )
 
-    def validate_current() -> str:
+    def validate_current() -> List[str]:
+        """Validate current inputs and return list of missing fields."""
+        errors = []
+        
         if not input.dataset():
-            return "Please select a Survey Dataset."
+            errors.append("Survey Dataset")
         if not (input.var_code() or "").strip():
-            return "Please enter Variable Code."
+            errors.append("Variable Code")
         if not (input.var_name() or "").strip():
-            return "Please enter Variable Name."
+            errors.append("Variable Name")
         if not (input.description() or "").strip():
-            return "Please enter Description."
+            errors.append("Description")
+        
         vt = input.var_type()
         if vt not in ["Indicator", "Demographic"]:
-            return "Please select Variable Type."
-        if vt == "Indicator":
+            errors.append("Variable Type")
+        elif vt == "Indicator":
             # Require a topic with at least one subtopic choice and a selected sub_topic
             topic = input.topic()
             subs = sorted(TOPICS.get(topic, {}).get("subtopics", {}).keys()) if topic else []
             if not topic or not subs:
-                return "Please select a Topic that has Sub-Topics."
+                errors.append("Topic (with Sub-Topics)")
             if not input.sub_topic():
-                return "Please select a Sub-Topic."
+                errors.append("Sub-Topic")
+        
+        try:
+            n = int(input.levels())
+            if not (2 <= n <= 6):
+                errors.append("Number of Levels (must be 2-6)")
+        except Exception:
+            errors.append("Number of Levels")
+            n = 0
+        
+        if n >= 2:
+            for i in range(1, n + 1):
+                try:
+                    name = (input[f"level_{i}"]() or "").strip()
+                except (KeyError, AttributeError):
+                    name = ""
+                if not name:
+                    errors.append(f"Level {i} Name")
+        
+        return errors
+
+    def build_var_data() -> Dict[str, Any]:
+        """Build variable data from current inputs, handling missing values gracefully."""
+        dataset = input.dataset() or ""
+        survey = SURVEYS.get(dataset, {"full_name": "", "population": "", "tag_suffix": ""})
+        
         try:
             n = int(input.levels())
         except Exception:
-            return "Please select a valid Number of Levels."
-        if not (2 <= n <= 6):
-            return "Number of Levels must be between 2 and 6."
+            n = 0
+        
+        # Get level values, handling cases where inputs might not exist yet
+        levels = []
         for i in range(1, n + 1):
-            name = (session.get_input(f"level_{i}") or "").strip()
-            if not name:
-                return f"Please enter a name for Level {i}."
-        return ""
-
-    def build_var_data() -> Dict[str, Any]:
-        dataset = input.dataset()
-        survey = SURVEYS[dataset]
-        n = int(input.levels())
-        levels = [(session.get_input(f"level_{i}") or "").strip() for i in range(1, n + 1)]
-        var_type = input.var_type()
+            try:
+                level_val = (input[f"level_{i}"]() or "").strip()
+            except (KeyError, AttributeError):
+                level_val = ""
+            levels.append(level_val)
+        var_type = input.var_type() or "Indicator"
         topic = input.topic() if var_type == "Indicator" else ""
         sub_topic = input.sub_topic() if var_type == "Indicator" else ""
-        ids = compute_ids(var_type, topic, sub_topic)
+        ids = compute_ids(var_type, topic or "", sub_topic or "")
+        
         return {
             "dataset": dataset,
             "dataset_name": survey["full_name"],
@@ -324,31 +352,73 @@ def server(input, output, session):
             "var_name": (input.var_name() or "").strip(),
             "description": (input.description() or "").strip(),
             "var_type": var_type,
-            "topic": topic,
-            "sub_topic": sub_topic,
+            "topic": topic or "",
+            "sub_topic": sub_topic or "",
             "topic_id": ids["topic_id"],
             "subtopic_id": ids["subtopic_id"],
             "levels": levels,
         }
 
+    @reactive.effect
     @reactive.event(input.add_var)
     def add_var():
-        err = validate_current()
-        last_error.set(err)
-        if err:
-            session.send_notification(err, type="error")
-            queued.set(queued.get())  # force UI update of validation_errors
+        errors = validate_current()
+        
+        if errors:
+            # Store errors and show confirmation modal
+            pending_validation_errors.set(errors)
+            awaiting_confirmation.set(True)
+            
+            error_list = "\n• ".join([""] + errors)
+            
+            m = ui.modal(
+                ui.markdown(f"**Incomplete values for:**{error_list}"),
+                ui.p("Add to queue anyway?"),
+                title="Validation Warning",
+                easy_close=False,
+                footer=ui.div(
+                    ui.input_action_button("modal_add_anyway", "Yes, Add Anyway", class_="btn-warning"),
+                    ui.input_action_button("modal_cancel", "Cancel", class_="btn-secondary"),
+                    style="display: flex; gap: 10px; justify-content: flex-end;"
+                ),
+            )
+            ui.modal_show(m)
             return
+        
+        # No errors, add directly
         q = queued.get().copy()
         q.append(build_var_data())
         queued.set(q)
         last_error.set("")
-        session.send_notification("Variable added to queue.", type="message")
+        ui.notification_show("Variable added to queue.", type="message")
+    
+    @reactive.effect
+    @reactive.event(input.modal_add_anyway)
+    def modal_add_anyway():
+        # User confirmed to add despite missing values
+        ui.modal_remove()
+        awaiting_confirmation.set(False)
+        
+        q = queued.get().copy()
+        q.append(build_var_data())
+        queued.set(q)
+        last_error.set("")
+        ui.notification_show("Variable added to queue (with incomplete values).", type="message")
+    
+    @reactive.effect
+    @reactive.event(input.modal_cancel)
+    def modal_cancel():
+        # User cancelled, just close modal
+        ui.modal_remove()
+        awaiting_confirmation.set(False)
+        errors = pending_validation_errors.get()
+        error_msg = "Missing: " + ", ".join(errors)
+        last_error.set(error_msg)
 
     @reactive.event(input.clear_queue)
     def _clear():
         queued.set([])
-        session.send_notification("Queue cleared.", type="message")
+        ui.notification_show("Queue cleared.", type="message")
 
     @output
     @render.text
@@ -374,7 +444,7 @@ def server(input, output, session):
         if not queued.get():
             msg = "No variables to generate SAS code."
             last_error.set(msg)
-            session.send_notification(msg, type="error")
+            ui.notification_show(msg, type="error")
 
     @output
     @render.text
